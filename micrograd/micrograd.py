@@ -65,7 +65,7 @@ class Value:
         out = Value(self.data**other, (self, ), f'**{other}')
 
         def _backward():
-            self.grad += other * (out.data**(other-1)) * out.grad
+            self.grad += other * (self.data**(other-1)) * out.grad
         out._backward = _backward
 
         return out
@@ -138,6 +138,10 @@ class Neuron:
        return out
 
 
+    def parameters(self):
+        return self.w + [self.b]
+
+
 # =================================================================
 
 
@@ -150,6 +154,16 @@ class Layer:
     def __call__(self, x):
         outs = [n(x) for n in self.neurons]
         return outs[0] if len(outs) == 1 else outs
+
+
+    def parameters(self):
+        # params = []
+        # for neuron in self.neurons:
+        #     neuron_params = neuron.parameters
+        #     params.extend(neuron_params)
+        # return params
+        # single-line version of the above
+        return [p for neuron in self.neurons for p in neuron.parameters()] 
 
 
 # =================================================================
@@ -166,3 +180,7 @@ class MLP:
         for layer in self.layers:
             x = layer(x)
         return x
+
+
+    def parameters(self):
+        return [p for layer in self.layers for p in layer.parameters()]
