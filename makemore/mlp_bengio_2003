@@ -1,0 +1,137 @@
+from utils import words, chars, char_to_i, i_to_char
+import torch
+import torch.nn.functional as F
+import random
+
+g = torch.Generator().manual_seed(2147483647)
+
+
+# Build the dataset
+
+
+def build_dataset(words):
+    block_size = 3
+    X, Y = [], []
+
+    for w in words:
+
+        context = [0] * block_size # initialize with all '...'
+        for char in w + '.':
+            ix = char_to_i[char]
+            X.append(context)
+            Y.append(ix)
+            context = context[1:] + [ix]
+
+    # An element of X contains three (indices for) characters, like [e, m, m]
+    X = torch.tensor(X)
+    # An element of Y contains the (index for) the next char, like [a] (as in emma)
+    Y = torch.tensor(Y)
+    return X, Y
+
+random.seed(42)
+random.shuffle(words)
+n1 = int(0.8*len(words))
+n2 = int(0.9*len(words))
+
+# Train (80%) split, dev/valuation split (10%), test split (10%)
+Xtr, Ytr = build_dataset(words[:n1])
+Xdev, Ydev = build_dataset(words[n1:n2])
+Xte, Yte = build_dataset(words[n2:])
+
+
+# Build a NN that takes the X's and predicts the Y's
+
+
+# Parameters 
+C  = torch.randn((27, 2), generator=g) # dim_chars, dim_emb
+W1 = torch.randn((2*3, 100), generator=g) # (dim_emb * block_size, N_neurons)
+b1 = torch.randn(100, generator=g)
+W2 = torch.randn((100, 27), generator=g)
+b2 = torch.rand(27, generator=g)
+parameters = [C, W1, b1, W2, b2]
+for p in parameters:
+    p.requires_grad = True
+
+# Explanation of emb = C[X]
+
+    # Let C = torch.randn((27, 2))
+    # C is the embedding matrix, sending each of the 27 chars to a 2-dim embedding vector
+    #
+    # X: 32 examples
+    # │
+    # ├── [0, 0, 5]
+    # ├── [0, 5, 13]
+    # ├── [5, 13, 13]
+    # │
+    # └── ...
+    # 
+    # ↓ Embedding
+    # 
+    # emb: 32 examples
+    # │
+    # ├── [[0.2, -1.1], [0.2, -1.1], [0.4, 0.8]]
+    # ├── [[0.2, -1.1], [0.4, 0.8], [-0.9, 0.4]]
+    # ├── [[0.4, 0.8], [-0.9, 0.4], [-0.9, 0.4]]
+    # │
+    # └── ...
+
+# Try different learning rates
+lre = torch.linspace(-3, 0, 1000) # exponentially spaced learning rates
+lrs = 10**lre # start at 10^-3 and end at 10^0
+
+lr_i = []
+loss_i = []
+for i in range(50000):
+
+    # Batch: list of 32 random indices between [0, num of rows in X (aka num of examples)]
+    ix = torch.randint(0, Xtr.shape[0], (32,))
+
+    # Forward pass
+    emb = C[Xtr[ix]] # grapping 32 randomly chosen rows of X
+    # .view in h re-interprets (32, 3, 2) as (32, 6)
+    #  The '-1' in .view instructs torch to infer the '32' from the shape of W
+    h = torch.tanh(emb.view(-1, 6) @ W1 + b1) # Hidden layer
+
+    logits = h @ W2 + b2
+    loss = F.cross_entropy(logits, Ytr[ix])
+
+    # Backward pass
+    for p in parameters:
+        p.grad = None
+
+    loss.backward()
+
+    # Update parameters
+    # lr = lrs[i]
+    lr = 0.1 if i < 10000 else 0.01 # discovered by tracking loss stats for different lrs
+    for p in parameters:
+        p.data += -lr * p.grad
+
+    # Track stats
+    # lr_i.append(lre[i])
+    # loss_i.append(loss.item())
+
+print(loss.item())
+
+
+# Sample from the model
+
+
+g = torch.Generator().manual_seed(2147483647 + 10)
+block_size = 3
+
+for _ in range(20):
+    out = []
+    context = [0] * block_size
+    while True:
+        emb = C[torch.tensor([context])] # (N_examples=1, block_size, embedding_dim)
+        h = torch.tanh(emb.view(1,-1) @ W1 + b1)
+        logits = h @ W2 + b2
+        probs = F.softmax(logits, dim=1)
+        ix = torch.multinomial(probs, num_samples=1, generator=g).item()
+        context = context[1:] + [ix]
+        out.append(ix)
+        if ix == 0: # if end character .
+            break
+
+    print(''.join(i_to_char[i] for i in out))
