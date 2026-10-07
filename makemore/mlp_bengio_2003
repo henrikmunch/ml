@@ -1,57 +1,25 @@
-from utils import words, char_to_i, i_to_char
+from utils import *
 import torch
 import torch.nn.functional as F
-import random
-
-g = torch.Generator().manual_seed(2147483647)
-
-# Build the dataset
-
-block_size = 3 # context length: how many characters do we take to predict the next?
-vocab_size = len(i_to_char) # number of characters 
-
-def build_dataset(words):
-    X, Y = [], []
-
-    for w in words:
-
-        context = [0] * block_size # initialize with all '...'
-        for char in w + '.':
-            ix = char_to_i[char]
-            X.append(context)
-            Y.append(ix)
-            context = context[1:] + [ix]
-
-    # An element of X contains three (indices for) characters, like [e, m, m]
-    X = torch.tensor(X)
-    # An element of Y contains the (index for) the next char, like [a] (as in emma)
-    Y = torch.tensor(Y)
-    return X, Y
-
-random.seed(42)
-random.shuffle(words)
-n1 = int(0.8*len(words))
-n2 = int(0.9*len(words))
-
-# Train (80%) split, dev/valuation split (10%), test split (10%)
-Xtr, Ytr   = build_dataset(words[:n1])
-Xdev, Ydev = build_dataset(words[n1:n2])
-Xte, Yte   = build_dataset(words[n2:])
 
 # Parameters 
-n_embed = 10 # embedding dimension
-n_hidden = 200 # number of neurons in hidden layer
-C  = torch.randn((vocab_size, n_embed), generator=g) 
-W1 = torch.randn((n_embed * block_size, n_hidden), generator=g) 
-b1 = torch.randn(n_hidden, generator=g)
-W2 = torch.randn((n_hidden, vocab_size), generator=g)
-b2 = torch.rand(vocab_size, generator=g)
 
-parameters = [C, W1, b1, W2, b2]
+# Normalizations come from gain / sqrt(fan_in)
+C  = torch.randn((vocab_size, n_embed), generator=g) 
+W1 = torch.randn((n_embed * block_size, n_hidden), generator=g) * (5/3) / (n_embed * block_size)**0.5
+b1 = torch.randn(n_hidden, generator=g) * (5/3) / n_hidden**0.5
+W2 = torch.randn((n_hidden, vocab_size), generator=g) * (5/3) / n_hidden**0.5
+b2 = torch.rand(vocab_size, generator=g) * 0 
+
+# Batch normalization gain and bias
+bn_gain = torch.ones((1, n_hidden))
+bn_bias = torch.zeros((1, n_hidden))
+bn_mean_running = torch.zeros((1, n_hidden))
+bn_std_running = torch.ones((1, n_hidden))
+
+parameters = [C, W1, b1, W2, b2, bn_gain, bn_bias]
 for p in parameters:
     p.requires_grad = True
-
-# ============ Makemore part 2
 
 # Explanation of emb = C[X]
 
@@ -78,8 +46,6 @@ for p in parameters:
 
 # Build a NN that takes the X's and predicts the Y's
 
-max_steps = 20_000
-batch_size = 32
 loss_i = []
 for i in range(max_steps):
 
@@ -87,22 +53,41 @@ for i in range(max_steps):
     ix = torch.randint(0, Xtr.shape[0], (batch_size,), generator=g)
     Xb, Yb = Xtr[ix], Ytr[ix]
 
+    # ----------------------
     # Forward pass
-    emb = C[Xb] # grapping the randomly chosen rows of X
+    # ----------------------
+    emb = C[Xb] # grabbing the randomly chosen rows of X
     # The .view re-interprets (32, 3, 2) as (32, 6)
     # The '-1' in .view instructs torch to infer the '32' from the shape of W
     emb_cat = emb.view(emb.shape[0], -1)
-    h_pre_act = emb_cat @ W1 + b1 # hidden layer pre-activation
+
+    # Linear layer
+    h_pre_act = emb_cat @ W1 + b1 # hidden layer pre-activation. can actually remove b1 due to batch norm
+
+    # Batch norm layer
+    bn_mean_i = h_pre_act.mean(0, keepdim=True)
+    bn_std_i = h_pre_act.std(0, keepdim=True)
+    h_pre_act = bn_gain * (h_pre_act - bn_mean_i) / bn_std_i + bn_bias # batch normalization
+
+    with torch.no_grad():
+        bn_mean_running = 0.999 * bn_mean_running + 0.001 * bn_mean_i
+        bn_std_running = 0.999 * bn_std_running + 0.001 * bn_std_i
+
+    # Non-linearity
     h = torch.tanh(h_pre_act) # hidden layer
     logits = h @ W2 + b2 # output layer
     loss = F.cross_entropy(logits, Yb)
 
+    # ----------------------
     # Backward pass
+    # ----------------------
     for p in parameters:
         p.grad = None
     loss.backward()
 
+    # ----------------------
     # Update parameters
+    # ----------------------
     lr = 0.1 if i < 10_000 else 0.01 
     for p in parameters:
         p.data += -lr * p.grad
@@ -135,6 +120,23 @@ if sample_bool == True:
             
         print(''.join(i_to_char[i] for i in out))
 
-# ============ Makemore part 3
+# Print loss for training, validation or test sets
 
+@torch.no_grad # disables gradient tracking
+def split_loss(split):
+    x, y = {
+        'train': (Xtr, Ytr),
+        'val': (Xdev, Ydev),
+        'test': (Xte, Yte),
+    }[split]
+    emb = C[x]
+    emb_cat = emb.view(emb.shape[0], -1)
+    h_pre_act = emb_cat @ W1 + b1 
+    h_pre_act = bn_gain * (h_pre_act - bn_mean_running) / bn_std_running + bn_bias 
+    h = torch.tanh(h_pre_act)
+    logits = h @ W2 + b2
+    loss = F.cross_entropy(logits, y)
+    print(split, loss.item())
 
+split_loss('train')
+split_loss('val')
