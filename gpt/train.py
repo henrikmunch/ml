@@ -1,7 +1,17 @@
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.nn import functional as F
+
 torch.manual_seed(1337)
+
+# hyperparameters
+block_size = 8  # aka maximal context length
+batch_size = 4  # number independent sequences processed in parallel
+max_iters = 3000
+eval_iters = 200
+eval_interval = 300
+learning_rate = 1e-2
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # read file
 with open('input.txt', 'r', encoding='utf-8') as f:
@@ -10,7 +20,7 @@ with open('input.txt', 'r', encoding='utf-8') as f:
 print(f'Length of dataset in characters: {len(text)}')
 
 # unique characters in the text
-chars = sorted(list(set(text)))
+chars = sorted(set(text))
 vocab_size = len(chars)
 
 print(f'Characters: {''.join(chars)}')
@@ -30,9 +40,6 @@ n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
-# aka maximal context length
-block_size = 8
-
 block_size_bool = False
 if block_size_bool:
     x = train_data[:block_size]
@@ -42,9 +49,6 @@ if block_size_bool:
         target = y[t]
         print(f'when input is {context} the target is {target}')
 
-# number independent sequences processed in parallel
-batch_size = 4
-
 
 def get_batch(split):
     # generate a small batch of inputs x and targets y
@@ -52,10 +56,26 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i + block_size] for i in ix])
     y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
+    x, y = x.to(device), y.to(device)
     return x, y
 
 
-# there are batch_size * block_size = 32 examples in a single batch
+@torch.no_grad
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            _, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+
+# there are batch_size * block_size many examples in a single batch
 xb, yb = get_batch('train')
 print('intputs:')
 print(xb.shape)
@@ -94,7 +114,7 @@ class BigramLanguageModel(nn.Module):
         # idx is a (B,T) array of indices in the current context
         for _ in range(max_new_tokens):
             # get the predictions
-            logits, loss = self(idx)
+            logits, _ = self(idx)
             # focus only on last time step
             logits = logits[:, -1, :]  # becomes (B,C)
             # apply softmax to get probabilities
@@ -103,17 +123,31 @@ class BigramLanguageModel(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)  # (B,1)
             # append sampled text to the running sequence
             idx = torch.cat((idx, idx_next), dim=1)  # (B,T+1)
-            return idx
+        return idx
 
 
-m = BigramLanguageModel(vocab_size)
-logits, loss = m(xb, yb)
-idx_test = m.generate(torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100)
-print(logits.shape)
-print(loss)
-print(decode(idx_test[0].tolist()))
+model = BigramLanguageModel(vocab_size)
+m = model.to(device)
 
+# create a PyTorch optimizer
+optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
 
+for iter in range(eval_iters):
 
+    # every once in a while evaluate the loss on train and val set
+    if iter % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
+    # sample a batch of data
+    xb, yb = get_batch('train')
 
+    # evaluate the loss
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+# generate from the model
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
+print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
