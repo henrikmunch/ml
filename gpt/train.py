@@ -4,6 +4,9 @@ from torch.nn import functional as F
 
 torch.manual_seed(1337)
 
+def header(title="", char="=", width=60):
+    print(f' {title} '.center(width, char) if title else char * width)
+
 # hyperparameters
 block_size = 8  # aka maximal context length
 batch_size = 4  # number independent sequences processed in parallel
@@ -17,14 +20,17 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 with open('input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-print(f'Length of dataset in characters: {len(text)}')
+header("Length of dataset in characters")
+print(len(text))
 
 # unique characters in the text
 chars = sorted(set(text))
 vocab_size = len(chars)
 
-print(f'Characters: {''.join(chars)}')
-print(f'Size of vocabulary: {vocab_size}')
+header("Characters")
+print(''.join(chars))
+header('Size of vocabulary')
+print(vocab_size)
 
 # create a mapping from chars to ints
 stoi = {ch: i for i, ch in enumerate(chars)}
@@ -40,16 +46,6 @@ n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
-block_size_bool = False
-if block_size_bool:
-    x = train_data[:block_size]
-    y = train_data[1:block_size + 1]
-    for t in range(block_size):
-        context = x[:t + 1]
-        target = y[t]
-        print(f'when input is {context} the target is {target}')
-
-
 def get_batch(split):
     # generate a small batch of inputs x and targets y
     data = train_data if split == 'train' else val_data
@@ -58,7 +54,6 @@ def get_batch(split):
     y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
     x, y = x.to(device), y.to(device)
     return x, y
-
 
 @torch.no_grad
 def estimate_loss():
@@ -74,18 +69,7 @@ def estimate_loss():
     model.train()
     return out
 
-
-# there are batch_size * block_size many examples in a single batch
-xb, yb = get_batch('train')
-print('intputs:')
-print(xb.shape)
-print(xb)
-print('targets:')
-print(yb.shape)
-print(yb)
-
 # bigram
-
 
 class BigramLanguageModel(nn.Module):
 
@@ -125,14 +109,14 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)  # (B,T+1)
         return idx
 
-
 model = BigramLanguageModel(vocab_size)
 m = model.to(device)
 
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
 
-for iter in range(eval_iters):
+header("Loss")
+for iter in range(max_iters):
 
     # every once in a while evaluate the loss on train and val set
     if iter % eval_interval == 0:
@@ -150,4 +134,5 @@ for iter in range(eval_iters):
 
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+header("Generate from model:")
+print(decode(m.generate(context, max_new_tokens=50)[0].tolist()))
