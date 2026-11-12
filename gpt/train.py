@@ -8,13 +8,16 @@ def header(title="", char="=", width=60):
     print(f' {title} '.center(width, char) if title else char * width)
 
 # hyperparameters
-block_size = 8  # aka maximal context length
-batch_size = 4  # number independent sequences processed in parallel
-n_embed = 32
-max_iters = 3000
+block_size = 256  # aka maximal context length
+batch_size = 64  # number independent sequences processed in parallel
+n_embed = 384
+n_head = 6
+n_layer = 6
+max_iters = 5000
 eval_iters = 200
-eval_interval = 300
-learning_rate = 1e-2
+eval_interval = 500
+learning_rate = 3e-4
+dropout = 0.2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # read file
@@ -82,6 +85,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embed, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         _, T, C = x.shape  # (B, T, C)
         k = self.key(x)  # (B, T, C)
@@ -90,10 +95,60 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) --> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
+        wei = self.dropout(wei)
         # perform the weighted aggregation of the values
         v = self.value(x)  # (B, T, C)
         out = wei @ v  # (B, T, T) @ (B, T, C) --> (B, T, C)
         return out
+
+# multi-head attention (attention heads in parallel)
+
+class MultiHeadAttention(nn.Module):
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(num_heads * head_size, n_embed)
+        self.dropout = nn.Dropout(dropout)
+
+    # if e.g. 4 heads of 8-dimensional self-attention, this concatenates to n_embed = 32 in forward method
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
+
+# linear layer followed by a non-linearity
+
+class FeedForward(nn.Module):
+
+    def __init__(self, n_embed):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embed, 4 * n_embed),  # the 4 is black magic from section 3.3 in AIAYN
+            nn.ReLU(),
+            nn.Linear(4 * n_embed, n_embed),  # projection layer
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# transformer block
+
+class Block(nn.Module):
+
+    def __init__(self, n_embed, n_head):
+        super().__init__()
+        head_size = n_embed // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embed)
+        self.ln1 = nn.LayerNorm(n_embed)  # similar to BatchNorm in MakeMore (here, columns become N(0,1))
+        self.ln2 = nn.LayerNorm(n_embed)
+
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))  # the 'x +' is skip-connection (residual stream)
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
 # bigram
 
@@ -105,6 +160,10 @@ class BigramLanguageModel(nn.Module):
         # for the next token from a lookup TabError
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
+        self.blocks = nn.Sequential(
+            *[Block(n_embed, n_head) for _ in range(n_layer)]
+        )
+        self.ln_f = nn.LayerNorm(n_embed)  # final layer norm
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -113,7 +172,9 @@ class BigramLanguageModel(nn.Module):
         # idx and targets are both a (B,T) tensor of int
         tok_emb = self.token_embedding_table(idx)  # (B, T, C1 = n_embed)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C1)
-        x = tok_emb + pos_emb
+        x = tok_emb + pos_emb  # (B, T, C1)
+        x = self.blocks(x)  # (B, T, C1)
+        x = self.ln_f(x)  # (B, T, C1)
         logits = self.lm_head(x)  # (B, T, C2 = vocab_size)
 
         if targets is None:
@@ -129,8 +190,10 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         # idx is a (B,T) array of indices in the current context
         for _ in range(max_new_tokens):
+            # crop idx because we cannot have more than block_size many tokens (cf. position_embedding_table.shape)
+            idx_cond = idx[:, -block_size:]
             # get the predictions
-            logits, _ = self(idx)
+            logits, _ = self(idx_cond)
             # focus only on last time step
             logits = logits[:, -1, :]  # becomes (B,C)
             # apply softmax to get probabilities
@@ -167,4 +230,4 @@ for iter in range(max_iters):
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 header("Generate from model:")
-print(decode(m.generate(context, max_new_tokens=50)[0].tolist()))
+print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
